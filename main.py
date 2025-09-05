@@ -1,121 +1,186 @@
-from openpyxl import load_workbook
-from docx import Document
-from datetime import datetime
 import os
+import shutil
 import re
+from docx import Document
+from openpyxl import load_workbook
 
-# ---------------- CONFIG ----------------
 TEMPLATE_FILE = "certificate.docx"
 EXCEL_FILE = "internship_details.xlsx"
 OUTPUT_DIR = "certificates"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ---------------- HELPERS ----------------
+# Load workbook
+wb = load_workbook(EXCEL_FILE, data_only=True)
+sheet = wb.active
 
-# Format date to "19-Jul-2025"
-def format_date(date_value):
-    if not date_value:
-        return ""
-    if isinstance(date_value, datetime):
-        return date_value.strftime("%d-%b-%Y")
-    # Remove suffixes from strings like "19th July 2025"
-    date_str = str(date_value)
-    date_str = re.sub(r"(st|nd|rd|th)", "", date_str)
+# Read headers from first row
+headers = [str(cell.value).strip() if cell.value is not None else "" for cell in sheet[1]]
+
+# Try common names for serial column; fallback to first column
+try:
+    slno_index = headers.index("Sl.No")
+except ValueError:
     try:
-        dt = datetime.strptime(date_str.strip(), "%d %B %Y")
-        return dt.strftime("%d-%b-%Y")
-    except:
-        return date_value  # leave as-is if parsing fails
+        slno_index = headers.index("Sl No")
+    except ValueError:
+        slno_index = 0
 
-# Sanitize filename
-def sanitize_filename(name):
-    name_str = "NA" if name is None else str(name)
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name_str)
+# Placeholder regex: captures text inside { ... }, allowing spaces
+PLACEHOLDER_RE = re.compile(r'\{\s*([^}]+?)\s*\}')
 
-# Build mapping for a row
-def build_mapping(row, headers):
-    mapping = {}
-    for hdr, val in zip(headers, row):
-        if hdr:
-            placeholder = "{" + hdr + "}"
-            # Format date columns
-            if hdr in ["Internship Start date", "Internship End date", "Date"]:
-                val = format_date(val)
-            mapping[placeholder] = "" if val is None else str(val)
-    return mapping
+def copy_formatting(target_run, source_run):
+    """Copy simple formatting from source run to target run (if available)."""
+    try:
+        target_run.bold = source_run.bold
+        target_run.italic = source_run.italic
+        target_run.underline = source_run.underline
+    except Exception:
+        pass
+    try:
+        if source_run.font.name:
+            target_run.font.name = source_run.font.name
+    except Exception:
+        pass
+    try:
+        if source_run.font.size:
+            target_run.font.size = source_run.font.size
+    except Exception:
+        pass
+    try:
+        if source_run.font.color and source_run.font.color.rgb:
+            target_run.font.color.rgb = source_run.font.color.rgb
+    except Exception:
+        pass
 
-# Replace placeholders in a paragraph and make replaced values bold
 def replace_placeholders_in_paragraph(paragraph, mapping):
-    # Combine all runs into one string for scanning
-    full_text = "".join(run.text for run in paragraph.runs)
-    new_text = ""
-    i = 0
-    while i < len(full_text):
-        if full_text[i] == '{':
-            j = i + 1
-            while j < len(full_text) and full_text[j] != '}':
-                j += 1
-            if j < len(full_text):
-                key = full_text[i:j+1]  # include braces
-                replacement = mapping.get(key, key)  # leave as-is if no value
-                new_text += replacement
-                i = j + 1
-            else:
-                new_text += full_text[i]
-                i += 1
+    """Replace {Key} placeholders in paragraph (even across runs), bold the replaced values,
+       and preserve formatting by copying formatting from the run where the placeholder starts."""
+    # Quick checks
+    if not paragraph.runs:
+        return
+    full_text = ''.join(run.text for run in paragraph.runs)
+    if "{" not in full_text:
+        return
+    matches = list(PLACEHOLDER_RE.finditer(full_text))
+    if not matches:
+        return
+
+    # Build run_map: for each character position, which run index it came from
+    run_map = []
+    for idx, run in enumerate(paragraph.runs):
+        text = run.text or ""
+        run_map.extend([idx] * len(text))
+
+    # Build sequence of segments: ('text'|'replace', text, char_position_for_formatting)
+    segments = []
+    last = 0
+    for m in matches:
+        s, e = m.start(), m.end()
+        key = m.group(1).strip()
+        if s > last:
+            segments.append(('text', full_text[last:s], last))
+        if key in mapping:
+            segments.append(('replace', mapping[key], s))
         else:
-            new_text += full_text[i]
-            i += 1
+            # keep placeholder as-is if no mapping found
+            segments.append(('text', full_text[s:e], s))
+        last = e
+    if last < len(full_text):
+        segments.append(('text', full_text[last:], last))
 
-    # Write back to first run and clear others
-    if paragraph.runs:
-        first_run = paragraph.runs[0]
-        first_run.text = new_text
-        for r in paragraph.runs[1:]:
-            r.text = ""
+    # Clear existing runs' text (keep run objects so we can copy formatting from them)
+    for run in paragraph.runs:
+        run.text = ''
 
-# Apply mapping to all paragraphs and tables
-def apply_mapping(doc, mapping):
-    # Paragraphs
+    # Append new runs for segments
+    for seg_type, seg_text, seg_pos in segments:
+        # determine source run for formatting (choose the run at seg_pos or fallback to last run)
+        if run_map:
+            if seg_pos < len(run_map):
+                src_idx = run_map[seg_pos]
+            else:
+                src_idx = run_map[-1]
+            src_run = paragraph.runs[src_idx]
+        else:
+            src_run = None
+
+        new_run = paragraph.add_run(seg_text)
+        if src_run is not None:
+            copy_formatting(new_run, src_run)
+        # If this is a replaced value, force bold (user-requested)
+        if seg_type == 'replace':
+            new_run.bold = True
+
+def process_document(doc, mapping):
+    # paragraphs
     for p in doc.paragraphs:
         replace_placeholders_in_paragraph(p, mapping)
-    # Tables
+
+    # tables
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     replace_placeholders_in_paragraph(p, mapping)
 
-# ---------------- MAIN SCRIPT ----------------
+    # headers and footers (all sections)
+    for section in doc.sections:
+        # header
+        header = section.header
+        if header is not None:
+            for p in header.paragraphs:
+                replace_placeholders_in_paragraph(p, mapping)
+            for table in header.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            replace_placeholders_in_paragraph(p, mapping)
+        # footer
+        footer = section.footer
+        if footer is not None:
+            for p in footer.paragraphs:
+                replace_placeholders_in_paragraph(p, mapping)
+            for table in footer.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            replace_placeholders_in_paragraph(p, mapping)
 
-# Load Excel
-wb = load_workbook(EXCEL_FILE)
-sheet = wb.active
-headers = ["" if c.value is None else str(c.value).strip() for c in sheet[1]]
+# MAIN loop: iterate rows, build mapping, duplicate template, replace, save
+for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+    try:
+        sl = row[slno_index]
+        if sl is None or str(sl).strip() == "":
+            print(f"Skipping row {row_idx} (empty Sl.No)")
+            continue
+        slno = str(sl).strip()
+        output_file = os.path.join(OUTPUT_DIR, f"{slno}.docx")
 
-# Get index of Sl.No for filenames
-try:
-    slno_index = headers.index("Sl.No")
-except ValueError:
-    slno_index = 0
+        # make a fresh copy of the template
+        shutil.copy2(TEMPLATE_FILE, output_file)
+        doc = Document(output_file)
 
-# Generate certificates
-for row in sheet.iter_rows(min_row=2, values_only=True):
-    mapping = build_mapping(row, headers)
-    slno_value = row[slno_index]
-    filename = f"{sanitize_filename(slno_value)}.docx"
-    out_path = os.path.join(OUTPUT_DIR, filename)
+        # Build mapping {Header: value}
+        mapping = {}
+        for i, h in enumerate(headers):
+            key = str(h).strip() if h else ""
+            val = row[i] if i < len(row) else None
+            mapping[key] = "" if val is None else str(val)
 
-    # Duplicate template
-    doc_copy = Document(TEMPLATE_FILE)
-    doc_copy.save(out_path)
+        # Print mapping for debug/visibility
+        print(f"\nRow {row_idx} -> Sl.No {slno} mapping:")
+        for k, v in mapping.items():
+            print(f"  {k} -> {v}")
 
-    # Open duplicate and apply replacements
-    doc_to_edit = Document(out_path)
-    apply_mapping(doc_to_edit, mapping)
-    doc_to_edit.save(out_path)
+        # Process replacements (paragraphs, tables, headers, footers)
+        process_document(doc, mapping)
 
-    print(f"Generated: {filename}")
+        # Save
+        doc.save(output_file)
+        print(f"Generated: {output_file}")
 
-print("All certificates generated successfully!")
+    except Exception as exc:
+        print(f"Error processing row {row_idx}: {exc}")
+
+print("\nDone.")
