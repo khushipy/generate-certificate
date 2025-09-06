@@ -8,15 +8,35 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 # ---------------- CONFIG ----------------
-TEMPLATE_FILENAME = "certificate.docx"
-EXCEL_FILENAME = "internship_details.xlsx"
-OUTPUT_DIRNAME = "certificates"
 
+CONFIG_FILE = "input.txt"
+OUTPUT_DIRNAME = "certificates"  # fixed
+
+# Read Excel filename, Word template filename, optional image, optional caption
+if not os.path.exists(CONFIG_FILE):
+    raise FileNotFoundError(f"{CONFIG_FILE} not found. Please create it with Excel and certificate filenames.")
+
+with open(CONFIG_FILE, "r") as f:
+    lines = [line.strip() for line in f.read().splitlines() if line.strip()]
+
+if len(lines) < 2:
+    raise ValueError(f"{CONFIG_FILE} must contain at least 2 lines: Excel filename and Template filename.")
+
+EXCEL_FILENAME = lines[0]
+TEMPLATE_FILENAME = lines[1]
+IMAGE_FILENAME = lines[2] if len(lines) >= 3 else None
+#CAPTION_TEXT = lines[3:] if len(lines) >= 4 else ""
+CAPTION_TEXT = ""
+# Construct full paths
 current_directory = os.getcwd()
 template_path = os.path.join(current_directory, TEMPLATE_FILENAME)
 excel_path = os.path.join(current_directory, EXCEL_FILENAME)
 output_dir = os.path.join(current_directory, OUTPUT_DIRNAME)
 os.makedirs(output_dir, exist_ok=True)
+
+image_path = os.path.join(current_directory, IMAGE_FILENAME) if IMAGE_FILENAME else None
+
+
 
 # ---------------- HELPERS ----------------
 PLACEHOLDER_RE = re.compile(r'\{\s*([^}]+?)\s*\}')
@@ -211,11 +231,49 @@ def generate():
     elif choice == "All Certificates":
         generate_certificates(cert_data)
 
+from PIL import Image, ImageTk
+
+def add_footer_image(frame):
+    if not image_path or not os.path.exists(image_path):
+        return
+
+    # Load and resize
+    img = Image.open(image_path)
+    img = img.resize((150, 100))  # adjust to fit window
+    photo = ImageTk.PhotoImage(img)
+
+    # Image label
+    img_label = tk.Label(frame, image=photo)
+    img_label.image = photo  # keep reference
+    img_label.pack(pady=4)
+
+    # Caption label
+    caption = CAPTION_TEXT if CAPTION_TEXT else '''Institute for Systems Studies & Analyses (ISSA),
+Defence Research and Development Organisation (DRDO)
+Ministry of Defence, Government of India.'''
+    caption_label = tk.Label(
+        frame,
+        text=caption,
+        font=("Arial", 9),
+        justify=tk.CENTER,     
+        wraplength=220         
+    )
+    caption_label.pack()
+
 # ---------------- UI ----------------
 root = tk.Tk()
 root.title("Certificate Generator")
-root.geometry("250x350")
+root.geometry("450x450")
 
+
+if image_path and os.path.exists(image_path):
+    try:
+        img = Image.open(image_path)
+        photo = ImageTk.PhotoImage(img)
+        root.iconphoto(True, photo)
+    except Exception as e:
+        print(f"Could not set window icon: {e}")
+        
 # Mode selection
 mode_var = tk.StringVar(value="Single Certificate")
 tk.Label(root, text="Choose generation mode:").pack(pady=4)
@@ -231,6 +289,7 @@ entry_single = tk.Entry(frame_single, width=15)
 entry_single.pack(pady=4)
 btn_single = ttk.Button(frame_single, text="Generate Certificate", command=generate)
 btn_single.pack(pady=6)
+add_footer_image(frame_single)
 
 # --- Selected Certificates Frame ---
 frame_selected = tk.Frame(root)
@@ -250,11 +309,13 @@ for cert_no, name, _ in cert_data:
 
 btn_selected = ttk.Button(frame_selected, text="Generate Certificates", command=generate)
 btn_selected.pack(pady=6)
+add_footer_image(frame_selected)
 
 # --- All Certificates Frame ---
 frame_all = tk.Frame(root)
 btn_all = ttk.Button(frame_all, text="Generate All Certificates", command=generate)
 btn_all.pack(pady=10)
+add_footer_image(frame_all)
 
 # Initialize view
 on_mode_change()
