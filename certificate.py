@@ -259,7 +259,7 @@ Metcalfe House, Civil Lines Delhi – 110054"""
             caption_label = tk.Label(
                 frame,
                 text=line,        # <-- use line, not caption
-                font=("Arial", 9),
+                font=("Arial", 8),
                 justify=tk.CENTER,
                 wraplength=300
                 )
